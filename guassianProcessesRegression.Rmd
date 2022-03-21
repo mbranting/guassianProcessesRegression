@@ -1,0 +1,363 @@
+---
+title: "GauProReg"
+author: "Kara Sumpter, Lauren Roe, McKenna Branting"
+date: "3/10/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r install}
+#if (!require("BiocManager", quietly = TRUE))
+#    install.packages("BiocManager")
+
+##BiocManager::install("Glimma")
+#BiocManager::install("GO.db")
+#BiocManager::install("org.Mm.eg.db")
+```
+
+Begin by loading libraries and data. 
+```{r lib}
+library(edgeR)
+library(limma)
+library(Glimma)
+library(org.Mm.eg.db)
+library(gplots)
+library(RColorBrewer)
+library(NMF)
+```
+Load necessary libraries
+
+```{r data}
+# Read the data into R
+seqdata <- read.delim("data/GSE60450_LactationGenewiseCounts.txt", stringsAsFactors = FALSE)
+# Read the sample information into R
+sampleinfo <- read.delim("data/SampleInfo.txt", stringsAsFactors = TRUE)
+
+head(seqdata)
+dim(seqdata)
+sampleinfo
+```
+Read data and show the beginning of seqdata to ensure it was loaded correctly. Also displays sampleinfo data. 
+
+
+### 1
+
+Explain gene expression and the two conditions, control and treatment.
+------------------------------------------------------------
+Gene Expression: is when the information stored in a gene is accessed to create proteins or types of RNA such as, rRNA and tRNA. The study of gene expressions starts when there is a list of genes that express differently based on two or more conditions, typically a control group and a treated group. By analyzing the differences we are able to determine what effect a gene has. At its core gene expression is finding out what genes have what effect on the organism.
+
+
+### 2
+
+Describe the Gaussian process (GP) and its relevancy to this exercise. Include the mathematical foundation, the R code, and illustrative plots.
+------------------------------------------------------------
+Gaussian Process:  Gaussian process (GP) is a model used in machine learning and statistical analysis.  Although GP can be used as linear regression, it is different from linear regression in that linear regression is a parametric model while GP is nonparametric, allowing this process to not be confined to a relationship based on parameters. When dealing with a complex system such as gene expression in machine learning, GP is used since many of the factors cannot be defined by simple parameters. The way GP works is it uses a kernel functions to determine how each data point corresponds to its neighbors. Training and testing sets are created and the relationship between the variables in the two sets modeled using a joint distribution to determine the distribution over functions. 
+
+
+```{r dataFormat}
+# Remove first two columns from seqdata
+countdata <- seqdata[,-(1:2)]
+# Look at the output
+head(countdata)
+# Store EntrezGeneID as rownames
+rownames(countdata) <- seqdata[,1]
+head(countdata)
+colnames(countdata)
+
+# using substr, you extract the characters starting at position 1 and stopping at position 7 of the colnames
+colnames(countdata) <- substr(colnames(countdata),start=1,stop=7)
+head(countdata)
+table(colnames(countdata)==sampleinfo$SampleName)
+
+```
+Format the data by removing the first two columns of the seqdata and extracting specific characters from colnames.
+
+```{r convertCounts}
+y <- DGEList(countdata)
+# have a look at y
+y
+# See what slots are stored in y
+names(y)
+# Library size information is stored in the samples slot
+y$samples
+group <- paste(sampleinfo$CellType,sampleinfo$Status,sep=".")
+# Take a look
+group
+# Convert to factor
+group <- factor(group)
+# Take another look.
+group
+# Add the group information into the DGEList
+y$samples$group <- group
+y$samples
+```
+
+
+```{r annotate}
+columns(org.Mm.eg.db)
+ann <- select(org.Mm.eg.db,keys=rownames(y$counts),columns=c("ENTREZID","SYMBOL","GENENAME"))
+head(ann)
+
+table(ann$ENTREZID==rownames(y$counts))
+y$genes <- ann
+
+```
+
+```{r filter}
+# Obtain CPMs
+myCPM <- cpm(countdata)
+# Have a look at the output
+head(myCPM)
+# Which values in myCPM are greater than 0.5?
+thresh <- myCPM > 0.5
+# This produces a logical matrix with TRUEs and FALSEs
+head(thresh)
+# Summary of how many TRUEs there are in each row
+# There are 11433 genes that have TRUEs in all 12 samples.
+table(rowSums(thresh))
+
+# we would like to keep genes that have at least 2 TRUES in each row of thresh
+keep <- rowSums(thresh) >= 2
+summary(keep)
+
+# Let's have a look and see whether our threshold of 0.5 does indeed correspond to a count of about 10-15
+# We will look at the first sample
+plot(myCPM[,1],countdata[,1])
+# Let us limit the x and y-axis so we can actually look to see what is happening at the smaller counts
+plot(myCPM[,1],countdata[,1],ylim=c(0,50),xlim=c(0,3))
+# Add a vertical line at 0.5 CPM
+abline(v=0.5)
+```
+```{r qualityCheck}
+y$samples$lib.size
+# The names argument tells the barplot to use the sample names on the x-axis
+# The las argument rotates the axis names
+barplot(y$samples$lib.size,names=colnames(y),las=2)
+# Add a title to the plot
+title("Barplot of library sizes")
+# we can also adjust the labelling if we want
+barplot(y$samples$lib.size/1e06, names=colnames(y), las=2, ann=FALSE, cex.names=0.75)
+mtext(side = 1, text = "Samples", line = 4)
+mtext(side = 2, text = "Library size (millions)", line = 3)
+title("Barplot of library sizes")
+
+
+# Get log2 counts per million
+logcounts <- cpm(y,log=TRUE)
+# Check distributions of samples using boxplots
+boxplot(logcounts, xlab="", ylab="Log2 counts per million",las=2)
+# Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+title("Boxplots of logCPMs (unnormalised)")
+
+# An MDSplot is a visualisation of a principle components analysis, which determines the greatest sources of variation in the data
+plotMDS(y)
+# We specify the option to let us plot two plots side-by-sde
+par(mfrow=c(1,2))
+# Let's set up colour schemes for CellType
+# How many cell types and in what order are they stored?
+levels(sampleinfo$CellType)
+## Let's choose purple for basal and orange for luminal
+col.cell <- c("purple","orange")[sampleinfo$CellType]
+data.frame(sampleinfo$CellType,col.cell)
+# Redo the MDS with cell type colouring
+plotMDS(y,col=col.cell)
+# Let's add a legend to the plot so we know which colours correspond to which cell type
+legend("topleft",fill=c("purple","orange"),legend=levels(sampleinfo$CellType))
+# Add a title
+title("Cell type")
+
+# Similarly for status
+levels(sampleinfo$Status)
+col.status <- c("blue","red","black")[sampleinfo$Status]
+col.status
+plotMDS(y,col=col.status)
+legend("topleft",fill=c("blue","red","black"),legend=levels(sampleinfo$Status),cex=0.8)
+title("Status")
+
+
+```
+
+```{r correctingData}
+# There is a sample info corrected file in your data directory
+# Old sampleinfo
+sampleinfo
+# I'm going to write over the sampleinfo object with the corrected sample info
+sampleinfo <- read.delim("data/SampleInfo_Corrected.txt", stringsAsFactors = TRUE)
+sampleinfo
+# We need to correct the info for the groups
+group <- factor(paste(sampleinfo$CellType,sampleinfo$Status,sep="."))
+y$samples$group <- group
+# Redo the MDSplot with corrected information
+par(mfrow=c(1,2))
+col.cell <- c("purple","orange")[sampleinfo$CellType]
+col.status <- c("blue","red","black")[sampleinfo$Status]
+plotMDS(y,col=col.cell)
+legend("topleft",fill=c("purple","orange"),legend=levels(sampleinfo$CellType))
+title("Cell type")
+plotMDS(y,col=col.status)
+legend("topleft",fill=c("blue","red","black"),legend=levels(sampleinfo$Status),cex=0.8)
+title("Status")
+```
+
+
+
+### 3
+
+Explain how GP can be used as linear regression and provide the necessary context using the data and the R tools prepared in Step 1. Tip: Research the kernlab package and the gausspr.
+------------------------------------------------------------
+- Kernlab package: kernel-based machine learning method for classification, regression, clustering, novelty detection, quantile regression and dimensionality reduction. 
+- Gausspr: implementation of Gaussian processes for classification and regression
+- Linear regressions can be achieved through these packages. Through fitting a linear model for each gene differentially expressed genes can be tested for.
+
+
+
+### 4
+
+Explain how you would use this model to make predictions and what exactly you can predict; include the mathematical foundation, the R code, and illustrative plots.
+------------------------------------------------------------
+```{r dim4}
+# Dimension 3 appears to separate pregnant samples from the rest. Dim4?
+plotMDS(y,dim=c(3,4),col=col.status,pch = 16,cex=2)
+# creates an interactive MDS plot using the Glimma package. This allows the user to interactively explore the different dimensions
+labels <- paste(sampleinfo$SampleName, sampleinfo$CellType, sampleinfo$Status)
+glMDSPlot(y, labels=labels, groups=group, folder="mds")
+
+```
+
+```{r normalization}
+# Apply normalisation to DGEList object
+y <- calcNormFactors(y)
+y$samples
+
+par(mfrow=c(1,2))
+plotMD(logcounts,column = 7)
+abline(h=0,col="grey")
+plotMD(logcounts,column = 11)
+abline(h=0,col="grey")
+
+```
+
+### 5
+
+Explain and demonstrate how you train your GP model.
+------------------------------------------------------------
+- Split data into train-test with ratio of 75:25
+- Identify independent and dependent variables for training and testing data 
+To train the model the data needs to be split into a test and train set. 
+
+```{r splitData}
+set.seed(2)
+# split the data 75:25
+sample_set <- sample(c(1:dim(seqdata)[1]), dim(seqdata)[1]*0.75)
+train <- seqdata[sample_set,]
+test <- seqdata[-sample_set,]
+
+head(train)
+```
+From the data the independent variables are the sample name, status of the mouse (pregnant, lactate, etc.) and the cell type. The dependent variables are the genes. These are what express differently depending on the status of the mouse and the cell type.  
+
+### 6
+
+Show the covariance function.
+------------------------------------------------------------
+- controls how much the data is smoothed in estimating the unknown function --> cov()
+- Guassian processes is specified by mean function and positive definite covariance function
+The covariance function has a large effect on the Gaussian process being estimated. The function GauPro uses the squared exponential, or Gaussian, covariance function. By specifying a covariance function using cov() we are able to smooth the data. 
+
+### 7
+
+Explain the Guassian process prior.
+------------------------------------------------------------
+ The covariance function of the Guassian process can be given a hierarchical prior, which allows the model to discover high-level properties of the data, such as which inputs are relevant to predicting the response. It isn’t feasible to sample a full function evaluation, therefore sampling function evaluations of a function drawn from a Gaussian process at a finite but arbitrary set of points allows for such. Guassian processes are a way to define prior distributions for flexible regression and classification models in which the regression or class probability functions are not limited to simple parametric forms. 
+
+
+### 8 
+
+Address posterior noise-free observations and predictions with noisy observations.
+------------------------------------------------------------
+In a Gaussian process regression for time series, all the observations are assumed to have the same noise. Noisy data is data with a large amount of additional meaningless information called noise. This kind of data can adversely affect the results of any data analysis and can overall skew conclusions. Removing noise from a data set is termed data smoothing. The noise free observations seem to have the greatest variance in regions with few training points. 
+
+
+
+### 9 
+
+Address optimization parameters and the objectives of optimization.
+------------------------------------------------------------
+Since GP is nonparametric and each data point is looked at as its own dimension, we want to avoid overfitting the data. This is why optimization parameters are important, so that the data avoids overfitting and can still be used as a useful tool to predict future events. 
+
+
+
+```{r limmaVoom}
+# Look at group variable 
+group
+
+# Specify a design matrix without an intercept term
+design <- model.matrix(~ 0 + group)
+design
+
+## Make the column names of the design matrix a bit nicer
+colnames(design) <- levels(group)
+design
+
+par(mfrow=c(1,1))
+v <- voom(y,design,plot = TRUE)
+v
+
+# we can repeat the box plots for the normalized data to compare to before normalization 
+
+par(mfrow=c(1,2))
+boxplot(logcounts, xlab="", ylab="Log2 counts per million",las=2,main="Unnormalised logCPM")
+## Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(logcounts),col="blue")
+boxplot(v$E, xlab="", ylab="Log2 counts per million",las=2,main="Voom transformed logCPM")
+## Let's add a blue horizontal line that corresponds to the median logCPM
+abline(h=median(v$E),col="blue")
+
+# Fit the linear model
+fit <- lmFit(v)
+names(fit)
+
+cont.matrix <- makeContrasts(B.PregVsLac=basal.pregnant - basal.lactate,levels=design)
+cont.matrix
+
+fit.cont <- contrasts.fit(fit, cont.matrix)
+fit.cont <- eBayes(fit.cont)
+dim(fit.cont)
+summa.fit <- decideTests(fit.cont)
+summary(summa.fit)
+```
+
+```{r writeResults}
+# We want to highlight the significant genes. We can get this from decideTests.
+par(mfrow=c(1,2))
+plotMD(fit.cont,coef=1,status=summa.fit[,"B.PregVsLac"], values = c(-1, 1), hl.col=c("blue","red"))
+
+# For the volcano plot we have to specify how many of the top genes to highlight.
+# We can also specify that we want to plot the gene symbol for the highlighted genes.
+# let's highlight the top 100 most DE genes
+volcanoplot(fit.cont,coef=1,highlight=100,names=fit.cont$genes$SYMBOL, main="B.PregVsLac")
+fit.cont$genes$SYMBOL
+```
+
+### 10
+
+Test for differential expression and explain what they explain in the context of your model.
+
+Differential expression is used in time-series to view the development of RNA in gene expression. GP is able to fit a model to estimate means with gene-wise variances. Graphs obtained from the GP give a prediction interval that can be used to categorize the genes into each group. Using GP and time-series, you are able to rank the differential expression of the gene profile. 
+
+
+### 11
+
+Summarize the findings of the analysis.
+
+This data shows what genes are significant in pregnant and lactating mice. This data is found by identifying what genes are more active in these mice than in virgin mice. First the top 500 most variable genes in the same population were identified. Then from these 500 the results were fit to the linear and Gaussian model. Then the top 100 genes with the most statistical significance were determined. These genes are listed above. 
+Being able to identify what genes are active during1 pregnancy and lactation could be a huge step in genetics. One of the issues that this could solve would be activating the gene for lactation in mothers who are struggling to produce milk. This way they could deliver necessary nutrients to their child without having to pay for formula. 
+
+
+A Gaussian process tests for differential expression. The model is able to make predictions by fitting a model to a dataset which provides a function; This allows for a prediction for the mean at any point along with a variance of this prediction. From this group means can be estimated along with gene-wise variances. Predicted error is also provided through confidence intervals. Guassian processes tend to have graphs whose width of the prediction interval is at its largest between the points and  go to zero near the data points. Overall this can help determine which genes are differentially expressed between each group. In the graphs concluded from running the above r segment, the mean-variance trend appears to decrease with a larger count size, as expected. 
+
+
